@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	jsonpatch "github.com/evanphx/json-patch"
 	"io"
 	"os"
 	"path/filepath"
@@ -378,7 +379,7 @@ func (c *Client) BuildTable(reader io.Reader, validate bool) (ResourceList, erro
 // occurs, a Result will still be returned with the error, containing all
 // resource updates, creations, and deletions that were attempted. These can be
 // used for cleanup or other logging purposes.
-func (c *Client) Update(original, target ResourceList, force bool) (*Result, error) {
+func (c *Client) Update(original, target ResourceList, force, use3WayMergePatch bool) (*Result, error) {
 	updateErrors := []string{}
 	res := &Result{}
 
@@ -413,7 +414,7 @@ func (c *Client) Update(original, target ResourceList, force bool) (*Result, err
 			return errors.Errorf("no %s with the name %q found", kind, info.Name)
 		}
 
-		if err := updateResource(c, info, originalInfo.Object, force); err != nil {
+		if err := updateResource(c, info, originalInfo.Object, force, use3WayMergePatch); err != nil {
 			c.Log("error updating the resource %q:\n\t %v", info.Name, err)
 			updateErrors = append(updateErrors, err.Error())
 		}
@@ -603,7 +604,7 @@ func deleteResource(info *resource.Info, policy metav1.DeletionPropagation) erro
 	return err
 }
 
-func createPatch(target *resource.Info, current runtime.Object) ([]byte, types.PatchType, error) {
+func createPatch(target *resource.Info, current runtime.Object, use3WayMergePatch bool) ([]byte, types.PatchType, error) {
 	oldData, err := json.Marshal(current)
 	if err != nil {
 		return nil, types.StrategicMergePatchType, errors.Wrap(err, "serializing current configuration")
@@ -640,8 +641,16 @@ func createPatch(target *resource.Info, current runtime.Object) ([]byte, types.P
 
 	if isUnstructured || isCRD {
 		// fall back to generic JSON merge patch
-		patch, err := jsonmergepatch.CreateThreeWayJSONMergePatch(oldData, newData, currentData)
-		return patch, types.MergePatchType, err
+		// TODO For Helm v4, this `if` for `use3WayMergePatch` should be removed and instead always
+		//      use the truthy path.  The flag should be removed from all the commands where it is
+		//      accepted: install, upgrade, & rollback.
+		if use3WayMergePatch {
+			patch, err := jsonmergepatch.CreateThreeWayJSONMergePatch(oldData, newData, currentData)
+			return patch, types.MergePatchType, err
+		} else {
+			patch, err := jsonpatch.CreateMergePatch(oldData, newData)
+			return patch, types.MergePatchType, err
+		}
 	}
 
 	patchMeta, err := strategicpatch.NewPatchMetaFromStruct(versionedObject)
@@ -653,7 +662,7 @@ func createPatch(target *resource.Info, current runtime.Object) ([]byte, types.P
 	return patch, types.StrategicMergePatchType, err
 }
 
-func updateResource(c *Client, target *resource.Info, currentObj runtime.Object, force bool) error {
+func updateResource(c *Client, target *resource.Info, currentObj runtime.Object, force, use3WayMergePatch bool) error {
 	var (
 		obj    runtime.Object
 		helper = resource.NewHelper(target.Client, target.Mapping).WithFieldManager(getManagedFieldsManager())
@@ -669,7 +678,7 @@ func updateResource(c *Client, target *resource.Info, currentObj runtime.Object,
 		}
 		c.Log("Replaced %q with kind %s for kind %s", target.Name, currentObj.GetObjectKind().GroupVersionKind().Kind, kind)
 	} else {
-		patch, patchType, err := createPatch(target, currentObj)
+		patch, patchType, err := createPatch(target, currentObj, use3WayMergePatch)
 		if err != nil {
 			return errors.Wrap(err, "failed to create patch")
 		}

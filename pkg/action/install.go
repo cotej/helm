@@ -71,6 +71,7 @@ type Install struct {
 
 	ClientOnly               bool
 	Force                    bool
+	ThreeWayMergePatch       bool
 	CreateNamespace          bool
 	DryRun                   bool
 	DisableHooks             bool
@@ -401,7 +402,7 @@ func (i *Install) performInstall(c chan<- resultMessage, rel *release.Release, t
 			return
 		}
 	} else if len(resources) > 0 {
-		if _, err := i.cfg.KubeClient.Update(toBeAdopted, resources, i.Force); err != nil {
+		if _, err := i.cfg.KubeClient.Update(toBeAdopted, resources, i.Force, i.ThreeWayMergePatch); err != nil {
 			i.reportToRun(c, rel, err)
 			return
 		}
